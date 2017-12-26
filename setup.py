@@ -26,8 +26,13 @@ except ImportError:
     from distutils.core import Extension, Command, setup
 from distutils.command.build_ext import build_ext
 from distutils.command.build import build
-from distutils.command.install_lib import install_lib
+from distutils.command.bdist_dumb import bdist_dumb
+from distutils.command.install import install as install_cmd
+from distutils.command.install_data import install_data as install_data_cmd
+from distutils.command.install_lib import install_lib as install_lib_cmd
+from distutils.dir_util import remove_tree
 from distutils.errors import CCompilerError
+from sysconfig import get_python_version
 import distutils
 import re, os, sys, shutil
 
@@ -360,6 +365,87 @@ class PCTBuildPy(build_py):
         if use_separate_namespace:
             rename_crypto_dir(self.build_lib)
 
+class InstallKodiAddon(install_data_cmd):
+    """Add addon.xml file to root of package."""
+
+    def initialize_options(self):
+        install_data_cmd.initialize_options(self)
+        self.data_files = [('.', ['kodi_build/addon.xml'])]
+
+    def finalize_options(self):
+        self.set_undefined_options('install_kodi',
+                                   ('install_data', 'install_dir'),
+                                   ('root', 'root'),
+                                   ('force', 'force'),
+                                  )
+
+class InstallKodiLib(install_lib_cmd):
+    """install_lib command, but inherit options from install_kodi
+       instead of install.
+    """
+
+    def finalize_options(self):
+        self.set_undefined_options('install_kodi',
+                                   ('build_lib', 'build_dir'),
+                                   ('install_lib', 'install_dir'),
+                                   ('force', 'force'),
+                                   ('compile', 'compile'),
+                                   ('optimize', 'optimize'),
+                                   ('skip_build', 'skip_build'),
+                                  )
+        if self.compile is None:
+            self.compile = 1
+        if self.optimize is None:
+            self.optimize = 0
+
+        if not isinstance(self.optimize, int):
+            try:
+                self.optimize = int(self.optimize)
+                if self.optimize not in (0, 1, 2):
+                    raise AssertionError
+            except (ValueError, AssertionError):
+                raise DistutilsOptionError, "optimize must be 0, 1, or 2"
+
+
+class InstallKodi(install_cmd):
+    """Override normal install for kodi plugin.
+       Remove egg_info subcommand and replace it with
+       install of addon.xml.
+    """
+
+    sub_commands = [('install_kodi_lib',     install_cmd.has_lib),
+                    ('install_addon', lambda self:True)
+                   ]
+
+
+class BDistKodiAddOn(bdist_dumb):
+    """Override default bdist and define appropriate install
+       parameters to build a zip file with relative paths suitable
+       for a kodi addon zip file.
+    """
+
+    def run(self):
+        if not self.skip_build:
+            self.run_command('build')
+
+        install = self.reinitialize_command('install_kodi', reinit_subcommands=1)
+        install.root = self.bdist_dir
+        install.skip_build = self.skip_build
+        install.warn_dir = 0
+        install.install_lib = 'lib'
+        install.install_data = '.'
+
+        self.run_command('install_kodi')
+        archive_basename = 'script.module.pycryptodomex'
+        pseudoinstall_root = os.path.join(self.dist_dir, archive_basename)
+        archive_root = self.bdist_dir
+        filename = self.make_archive(pseudoinstall_root,
+                                     'zip', root_dir=archive_root,
+                                     owner=self.owner, group=self.group)
+        self.distribution.dist_files.append(('bdist_dumb', get_python_version(),
+                                             filename))
+        if not self.keep_temp:
+            remove_tree(self.bdist_dir, dry_run=self.dry_run)
 
 class TestCommand(Command):
 
@@ -501,7 +587,11 @@ setup(
     cmdclass = {
         'build_ext':PCTBuildExt,
         'build_py': PCTBuildPy,
-        'test': TestCommand
+        'test': TestCommand,
+        'install_kodi': InstallKodi,
+        'install_addon': InstallKodiAddon,
+        'install_kodi_lib': InstallKodiLib,
+        'bdist_kodi': BDistKodiAddOn
         },
     ext_modules = [
         # Hash functions
